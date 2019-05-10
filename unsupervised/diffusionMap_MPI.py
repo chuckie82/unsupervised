@@ -6,27 +6,33 @@ import matplotlib.pyplot as plt
 import scipy.ndimage
 import utils
 import time
+import sys
 
 stime = time.time()
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
-assert size>=1, 'Require at least one mpi ranks'
 assert utils.getBase(size), 'Can not deal with this size'
 status = MPI.Status()
 
-doPlot = True
-numImgs = 3599
+print "rank: ", rank, size, os.uname()
+sys.stdout.flush()
+
+doPlot = False
+numImgs = 19996 #3599 
 indX, indY = utils.getMyChunk(numImgs,size,rank)
 
 # input
 tic = time.time()
-dir = "/reg/d/psdm/cxi/cxitut13/scratch/yoon82/simulation/6nyf"
+#dir = "/reg/d/psdm/cxi/cxitut13/scratch/yoon82/simulation/6nyf"
+dir = "/global/homes/c/chuck/unsupervised/unsupervised"
+outdir = "/project/projectdirs/lcls/chuck/unsupervised"
 pdb = "6NYF"
 symmetry=6
 nPix = 384
-fname = pdb+"_signoise40.h5"
+fname = pdb+"_signoise40_phi0p018.h5"
+print "fname: ", os.path.join(dir,fname)
 f = h5py.File(os.path.join(dir,fname),"r")
 ind = None
 onDiagonal = np.array_equal(indX,indY)
@@ -41,6 +47,7 @@ for i, val in enumerate(ind):
     imgStack[i,:,:] = f['/MDF/images/'+str(val)+'/image']
 f.close()
 print "Done loading data: ", rank, time.time() - tic
+sys.stdout.flush()
 
 # normalization
 tic = time.time()
@@ -49,6 +56,7 @@ normImgs = np.zeros((numChunkImgs,nPix*nPix))
 for i in range(numChunkImgs):
     normImgs[i,:]=utils.varNorm(imgStack[i,:,:]*mask).flatten()
 print "Done normalizing data: ", rank, time.time() - tic
+sys.stdout.flush()
 
 # L2-norm
 tic = time.time()
@@ -60,8 +68,11 @@ else:
     numX = len(indX)
     myD = euclidean_distances(normImgs[0:numX,:], normImgs[numX::,:])
 print "Done L2-norm: ", rank, time.time() - tic
+sys.stdout.flush()
+del normImgs
+
 # Save distance chunks to file
-dname = 'L2_' + str(rank) + '.npz'
+dname = os.path.join(outdir,'L2_' + str(rank) + '.npz')
 np.savez(dname, chunkD=myD, indX=[indX[0],indX[-1]], indY=[indY[0],indY[-1]])
 
 # Scan eps
@@ -96,11 +107,12 @@ if rank == 0:
         targetY = 0.75
         sigmaK = np.exp((targetY - normL[maxInd]) / gradient + logEps[maxInd]) # gradient is in log space
     print "Done optimizing sigmaK: ", time.time() - tic
+    sys.stdout.flush() 
 
     # Load distance chunks
     myD = np.zeros((numImgs,numImgs))
     for i in range(size):
-        dname = 'L2_' + str(i) + '.npz'
+        dname = os.path.join(outdir,'L2_' + str(i) + '.npz')
         npz = np.load(dname)
         sx = npz['indX'][0]
         ex =npz['indX'][-1]
@@ -110,11 +122,14 @@ if rank == 0:
 
     # Symmetrize
     myD = np.maximum(myD, myD.transpose())
+    print "Done constructing affinity matrix: ", time.time() - tic
+    sys.stdout.flush()
 
     # Diffusion map
     tic = time.time()
     Y,s = utils.diffusionMap(myD, sigmaK=sigmaK, numEigs=numEigs)
     print "Done diffusion map: ", time.time() - tic
+    sys.stdout.flush()
 
     # Rotating images clockwise
     tic = time.time()
@@ -126,6 +141,7 @@ if rank == 0:
         ang[i] = np.arctan2(Y[i,1], Y[i,0]) * (180/np.pi)
         corrImgStack[i,:,:] = scipy.ndimage.rotate(imgStack[i,:,:], (ang[i]/symmetry), reshape=False)
     fomCW=np.mean(np.var(corrImgStack,axis=0))
+    del corrImgStack
 
     # Rotating images anti-clockwise
     corrImgStack1 = np.zeros((subset, nPix, nPix),dtype=np.float32)
@@ -137,6 +153,7 @@ if rank == 0:
         direction = -1
     del corrImgStack1
     print "Done determine direction: ", time.time() - tic
+    sys.stdout.flush()
 
 comm.Bcast(np.ascontiguousarray(Y), root=0)
 comm.Bcast(np.ascontiguousarray(s), root=0)
@@ -164,6 +181,7 @@ if rank < utils.getBase(size):
         meanImg += scipy.ndimage.rotate(imgStack[i+offset,:,:], (direction * ang/symmetry), reshape=False)
     meanImg /= len(indY)
     print "Done rotating back data: ", time.time() - tic
+    sys.stdout.flush()
 
 recvbuf=None
 if rank == 0:
@@ -173,9 +191,11 @@ comm.Gather(meanImg, recvbuf, root=0)
 if rank == 0:
     meanImg = np.mean(recvbuf[0:utils.getBase(size),:,:], axis=0)
     print "Time to solution: ", time.time() - stime
+    sys.stdout.flush()
     # Show reconstruction
-    plt.figure(figsize=(20,20))
-    plt.imshow(meanImg,interpolation='none',vmin=2500); plt.show()
-    fout = pdb+"_meanImag.npy"
+    if doPlot:
+        plt.figure(figsize=(20,20))
+        plt.imshow(meanImg,interpolation='none',vmin=2500); plt.show()
+    fout = os.path.join(outdir,pdb+"_meanImg.npy")
     np.save(fout, meanImg)
 
